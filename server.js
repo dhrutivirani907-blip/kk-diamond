@@ -77,7 +77,7 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS products (
       id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
       price NUMERIC(12,2) NOT NULL CHECK (price >= 0), image_data TEXT NOT NULL,
-      active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW()
+      active BOOLEAN NOT NULL DEFAULT TRUE, in_stock BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS orders (
       id BIGSERIAL PRIMARY KEY, customer_id BIGINT NOT NULL REFERENCES customers(id),
@@ -95,6 +95,7 @@ async function initDb() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+  await pool.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS in_stock BOOLEAN NOT NULL DEFAULT TRUE');
   const count = await pool.query('SELECT COUNT(*)::int AS n FROM products');
   if (count.rows[0].n === 0) {
     await pool.query('INSERT INTO products(name,description,price,image_data) VALUES($1,$2,$3,$4)', [
@@ -126,7 +127,7 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.get('/api/products', async (_req,res) => {
-  try { const q = await pool.query('SELECT id,name,description,price,image_data,created_at FROM products WHERE active=TRUE ORDER BY created_at DESC'); res.json(q.rows); }
+  try { const q = await pool.query('SELECT id,name,description,price,image_data,in_stock,created_at FROM products WHERE active=TRUE ORDER BY created_at DESC'); res.json(q.rows); }
   catch(e) { console.error(e); res.status(500).json({error:'Could not load products.'}); }
 });
 app.get('/api/me', userAuth, async (req,res) => {
@@ -143,8 +144,8 @@ app.post('/api/orders', userAuth, async (req,res) => {
     if (!Number.isSafeInteger(productId) || productId<1 || !name || !country || !address || !/^[A-Za-z0-9-]{6,40}$/.test(utr)) return res.status(400).json({error:'Please complete all details and enter a valid UPI Transaction ID / UTR.'});
     const c=await pool.query('SELECT id,phone FROM customers WHERE id=$1',[req.session.id]);
     if(!c.rowCount)return res.status(401).json({error:'Please sign in again.'});
-    const p=await pool.query('SELECT id,name,price,image_data FROM products WHERE id=$1 AND active=TRUE',[productId]);
-    if(!p.rowCount)return res.status(404).json({error:'This product is no longer available.'});
+    const p=await pool.query('SELECT id,name,price,image_data FROM products WHERE id=$1 AND active=TRUE AND in_stock=TRUE',[productId]);
+    if(!p.rowCount)return res.status(409).json({error:'This jewellery is out of stock or no longer available.'});
     const product=p.rows[0];
     const o=await pool.query(`INSERT INTO orders(customer_id,product_id,product_name,product_image,price,country,customer_name,address,phone,utr)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,status,status_message,created_at`,
@@ -163,6 +164,28 @@ app.post('/api/admin/login', (req,res) => {
   const a=Buffer.from(supplied), b=Buffer.from(ADMIN_PASSWORD);
   if(a.length!==b.length || !crypto.timingSafeEqual(a,b)) return res.status(401).json({error:'Incorrect admin password.'});
   res.json({token:sign({kind:'admin',exp:Date.now()+12*60*60*1000})});
+});
+app.get('/api/admin/products',adminAuth,async(_req,res)=>{
+  try{const q=await pool.query('SELECT id,name,description,price,image_data,in_stock,created_at FROM products WHERE active=TRUE ORDER BY created_at DESC');res.json(q.rows);}
+  catch(e){console.error(e);res.status(500).json({error:'Could not load products.'});}
+});
+app.patch('/api/admin/products/:id/stock',adminAuth,async(req,res)=>{
+  try{
+    const id=Number(req.params.id), inStock=req.body.inStock;
+    if(!Number.isSafeInteger(id)||id<1||typeof inStock!=='boolean')return res.status(400).json({error:'Invalid stock update.'});
+    const q=await pool.query('UPDATE products SET in_stock=$1 WHERE id=$2 AND active=TRUE RETURNING id,name,in_stock',[inStock,id]);
+    if(!q.rowCount)return res.status(404).json({error:'Product not found.'});
+    res.json(q.rows[0]);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not update stock.'});}
+});
+app.delete('/api/admin/products/:id',adminAuth,async(req,res)=>{
+  try{
+    const id=Number(req.params.id);
+    if(!Number.isSafeInteger(id)||id<1)return res.status(400).json({error:'Invalid product.'});
+    const q=await pool.query('UPDATE products SET active=FALSE WHERE id=$1 AND active=TRUE RETURNING id,name',[id]);
+    if(!q.rowCount)return res.status(404).json({error:'Product not found.'});
+    res.json({ok:true,id:q.rows[0].id,name:q.rows[0].name});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not remove product.'});}
 });
 app.get('/api/admin/orders',adminAuth,async(_req,res)=>{
   try{const q=await pool.query(`SELECT o.id,o.product_name,o.product_image,o.price,o.country,o.customer_name,o.address,o.phone,o.utr,o.status,o.status_message,o.cancel_reason,o.created_at,o.updated_at,c.id AS customer_id FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.created_at DESC`);res.json(q.rows);}
