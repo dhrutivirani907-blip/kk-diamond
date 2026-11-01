@@ -1,8 +1,8 @@
 {
   "name": "kk-diamond-store",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "KK DIAMOND premium jewellery store and order management app",
+  "description": "KK DIAMOND jewellery storefront and admin backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
